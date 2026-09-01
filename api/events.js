@@ -70,6 +70,24 @@ async function parseICSFeed(calConfig) {
           const dates = event.rrule.between(pastLimit, futureLimit, true);
           const duration = end ? end.getTime() - start.getTime() : 3600000;
 
+          // Fix rrule timezone double-conversion:
+          // node-ical correctly parses event.start to UTC, but the rrule library
+          // may apply the timezone offset again (especially with Windows TZ IDs
+          // like "India Standard Time"). Detect by comparing time-of-day.
+          let tzFixMs = 0;
+          if (dates.length > 0 && start) {
+            const startTOD = start.getUTCHours() * 3600000 + start.getUTCMinutes() * 60000 + start.getUTCSeconds() * 1000;
+            const d0 = new Date(dates[0]);
+            const rruleTOD = d0.getUTCHours() * 3600000 + d0.getUTCMinutes() * 60000 + d0.getUTCSeconds() * 1000;
+            let diff = startTOD - rruleTOD;
+            if (diff > 12 * 3600000) diff -= 24 * 3600000;
+            if (diff < -12 * 3600000) diff += 24 * 3600000;
+            if (diff !== 0) {
+              console.log(`[RRULE TZ FIX] "${event.summary}" — correcting by ${diff / 3600000}h`);
+              tzFixMs = diff;
+            }
+          }
+
           // Build exdates set (excluded/cancelled occurrences)
           const exdates = new Set();
           if (event.exdate) {
@@ -85,13 +103,13 @@ async function parseICSFeed(calConfig) {
           }
 
           occurrences = dates
-            .filter(d => !exdates.has(new Date(d).toDateString()))
+            .filter(d => !exdates.has(new Date(new Date(d).getTime() + tzFixMs).toDateString()))
             .map(d => ({
-              start: d,
-              end: new Date(d.getTime() + duration),
+              start: new Date(new Date(d).getTime() + tzFixMs),
+              end: new Date(new Date(d).getTime() + tzFixMs + duration),
             }));
 
-          console.log(`[RRULE] "${event.summary}" — rrule.between found ${dates.length} dates, after exdate filter: ${occurrences.length}`);
+          console.log(`[RRULE] "${event.summary}" — found ${dates.length} dates, after exdate filter: ${occurrences.length}, tzFix: ${tzFixMs / 3600000}h`);
         } catch (e) {
           console.error(`[RRULE ERROR] "${event.summary}":`, e.message);
           // Fallback: if rrule parsing fails, show original occurrence if in range
