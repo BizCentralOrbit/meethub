@@ -62,24 +62,43 @@ async function parseICSFeed(calConfig) {
       const end = event.end ? new Date(event.end) : null;
 
       if (!start || isNaN(start.getTime())) continue;
-      if (start < pastLimit || start > futureLimit) continue;
 
       // Handle recurring events - expand occurrences
       let occurrences = [];
       if (event.rrule) {
         try {
+          // For recurring events, don't filter by date range yet —
+          // the original start may be far in the past
           const dates = event.rrule.between(pastLimit, futureLimit, true);
-          occurrences = dates.map(d => {
-            const duration = end ? end.getTime() - start.getTime() : 3600000;
-            return {
+          const duration = end ? end.getTime() - start.getTime() : 3600000;
+
+          // Also check exdates (excluded dates) for cancelled occurrences
+          const exdates = new Set();
+          if (event.exdate) {
+            const exObj = typeof event.exdate === 'object' && !Array.isArray(event.exdate) && !(event.exdate instanceof Date)
+              ? Object.values(event.exdate)
+              : Array.isArray(event.exdate) ? event.exdate : [event.exdate];
+            exObj.forEach(d => {
+              const dt = new Date(d);
+              if (!isNaN(dt.getTime())) exdates.add(dt.toDateString());
+            });
+          }
+
+          occurrences = dates
+            .filter(d => !exdates.has(new Date(d).toDateString()))
+            .map(d => ({
               start: d,
               end: new Date(d.getTime() + duration),
-            };
-          });
+            }));
         } catch (e) {
-          occurrences = [{ start, end }];
+          // Fallback: if rrule parsing fails, show original occurrence if in range
+          if (start >= pastLimit && start <= futureLimit) {
+            occurrences = [{ start, end }];
+          }
         }
       } else {
+        // Non-recurring: filter by date range
+        if (start < pastLimit || start > futureLimit) continue;
         occurrences = [{ start, end }];
       }
 
