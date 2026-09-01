@@ -67,18 +67,18 @@ async function parseICSFeed(calConfig) {
       let occurrences = [];
       if (event.rrule) {
         try {
-          // For recurring events, don't filter by date range yet —
-          // the original start may be far in the past
           const dates = event.rrule.between(pastLimit, futureLimit, true);
           const duration = end ? end.getTime() - start.getTime() : 3600000;
 
-          // Also check exdates (excluded dates) for cancelled occurrences
+          // Build exdates set (excluded/cancelled occurrences)
           const exdates = new Set();
           if (event.exdate) {
-            const exObj = typeof event.exdate === 'object' && !Array.isArray(event.exdate) && !(event.exdate instanceof Date)
-              ? Object.values(event.exdate)
-              : Array.isArray(event.exdate) ? event.exdate : [event.exdate];
-            exObj.forEach(d => {
+            const exArr = (event.exdate instanceof Date)
+              ? [event.exdate]
+              : Array.isArray(event.exdate)
+                ? event.exdate
+                : Object.values(event.exdate);
+            exArr.forEach(d => {
               const dt = new Date(d);
               if (!isNaN(dt.getTime())) exdates.add(dt.toDateString());
             });
@@ -90,12 +90,33 @@ async function parseICSFeed(calConfig) {
               start: d,
               end: new Date(d.getTime() + duration),
             }));
+
+          console.log(`[RRULE] "${event.summary}" — rrule.between found ${dates.length} dates, after exdate filter: ${occurrences.length}`);
         } catch (e) {
+          console.error(`[RRULE ERROR] "${event.summary}":`, e.message);
           // Fallback: if rrule parsing fails, show original occurrence if in range
           if (start >= pastLimit && start <= futureLimit) {
             occurrences = [{ start, end }];
           }
         }
+      } else if (event.recurrences) {
+        // node-ical sometimes pre-expands recurrences instead of giving rrule
+        const duration = end ? end.getTime() - start.getTime() : 3600000;
+        for (const [, recEvent] of Object.entries(event.recurrences)) {
+          const rStart = recEvent.start ? new Date(recEvent.start) : null;
+          if (!rStart || isNaN(rStart.getTime())) continue;
+          if (rStart >= pastLimit && rStart <= futureLimit) {
+            occurrences.push({
+              start: rStart,
+              end: new Date(rStart.getTime() + duration),
+            });
+          }
+        }
+        // Also include the original if in range
+        if (start >= pastLimit && start <= futureLimit) {
+          occurrences.push({ start, end });
+        }
+        console.log(`[RECURRENCES] "${event.summary}" — found ${occurrences.length} expanded occurrences`);
       } else {
         // Non-recurring: filter by date range
         if (start < pastLimit || start > futureLimit) continue;
