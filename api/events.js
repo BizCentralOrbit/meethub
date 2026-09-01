@@ -1,0 +1,167 @@
+const ical = require('node-ical');
+
+// Parse calendar configs from environment variables
+function getCalendarConfigs() {
+  const calendars = [];
+  for (let i = 1; i <= 10; i++) {
+    const url = process.env[`CALENDAR_${i}_URL`];
+    if (url && url.trim()) {
+      calendars.push({
+        id: `cal-${i}`,
+        url: url.trim(),
+        name: process.env[`CALENDAR_${i}_NAME`] || `Calendar ${i}`,
+        color: process.env[`CALENDAR_${i}_COLOR`] || '#3B82F6',
+        timezone: process.env[`CALENDAR_${i}_TIMEZONE`] || 'UTC',
+      });
+    }
+  }
+  return calendars;
+}
+
+// Extract meeting join link from event
+function extractJoinLink(event) {
+  const fields = [
+    event.location || '',
+    event.description || '',
+    event.url?.val || event.url || '',
+  ].join(' ');
+
+  // Google Meet
+  const meetMatch = fields.match(/https:\/\/meet\.google\.com\/[a-z\-]+/i);
+  if (meetMatch) return { url: meetMatch[0], platform: 'google-meet' };
+
+  // Microsoft Teams
+  const teamsMatch = fields.match(/https:\/\/teams\.microsoft\.com\/l\/meetup-join\/[^\s<"')]+/i);
+  if (teamsMatch) return { url: teamsMatch[0], platform: 'teams' };
+
+  // Zoom
+  const zoomMatch = fields.match(/https:\/\/[\w.]*zoom\.us\/j\/[^\s<"')]+/i);
+  if (zoomMatch) return { url: zoomMatch[0], platform: 'zoom' };
+
+  // Generic URL fallback from location
+  if (event.location && /^https?:\/\//.test(event.location.trim())) {
+    return { url: event.location.trim(), platform: 'link' };
+  }
+
+  return null;
+}
+
+// Parse a single ICS feed
+async function parseICSFeed(calConfig) {
+  try {
+    const data = await ical.async.fromURL(calConfig.url);
+    const events = [];
+    const now = new Date();
+    const pastLimit = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); // 7 days ago
+    const futureLimit = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days ahead
+
+    for (const [, event] of Object.entries(data)) {
+      if (event.type !== 'VEVENT') continue;
+
+      const start = event.start ? new Date(event.start) : null;
+      const end = event.end ? new Date(event.end) : null;
+
+      if (!start || isNaN(start.getTime())) continue;
+      if (start < pastLimit || start > futureLimit) continue;
+
+      // Handle recurring events - expand occurrences
+      let occurrences = [];
+      if (event.rrule) {
+        try {
+          const dates = event.rrule.between(pastLimit, futureLimit, true);
+          occurrences = dates.map(d => {
+            const duration = end ? end.getTime() - start.getTime() : 3600000;
+            return {
+              start: d,
+              end: new Date(d.getTime() + duration),
+            };
+          });
+        } catch (e) {
+          occurrences = [{ start, end }];
+        }
+      } else {
+        occurrences = [{ start, end }];
+      }
+
+      const joinLink = extractJoinLink(event);
+
+      for (const occ of occurrences) {
+        events.push({
+          id: `${calConfig.id}-${event.uid}-${occ.start.getTime()}`,
+          title: event.summary || '(No title)',
+          start: occ.start.toISOString(),
+          end: occ.end ? occ.end.toISOString() : null,
+          allDay: !!(event.datetype === 'date'),
+          location: event.location || null,
+          description: (event.description || '').substring(0, 500),
+          calendarId: calConfig.id,
+          calendarName: calConfig.name,
+          calendarColor: calConfig.color,
+          calendarTimezone: calConfig.timezone,
+          joinLink: joinLink ? joinLink.url : null,
+          joinPlatform: joinLink ? joinLink.platform : null,
+          organizer: event.organizer?.params?.CN || event.organizer?.val || null,
+          status: event.status || null,
+        });
+      }
+    }
+    return events;
+  } catch (err) {
+    console.error(`Failed to fetch calendar "${calConfig.name}":`, err.message);
+    return [];
+  }
+}
+
+module.exports = async function handler(req, res) {
+  // Optional password protection
+  const appPassword = process.env.APP_PASSWORD;
+  if (appPassword) {
+    const authHeader = req.headers['x-meethub-auth'] || '';
+    const queryAuth = req.query?.auth || '';
+    if (authHeader !== appPassword && queryAuth !== appPassword) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+  }
+
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'X-MeetHub-Auth');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  try {
+    const configs = getCalendarConfigs();
+
+    if (configs.length === 0) {
+      return res.status(200).json({
+        events: [],
+        calendars: [],
+        error: 'No calendars configured. Add CALENDAR_*_URL environment variables.',
+      });
+    }
+
+    // Fetch all feeds in parallel
+    const results = await Promise.all(configs.map(c => parseICSFeed(c)));
+    const allEvents = results.flat();
+
+    // Sort by start time
+    allEvents.sort((a, b) => new Date(a.start) - new Date(b.start));
+
+    const calendars = configs.map(c => ({
+      id: c.id,
+      name: c.name,
+      color: c.color,
+      timezone: c.timezone,
+      eventCount: allEvents.filter(e => e.calendarId === c.id).length,
+    }));
+
+    return res.status(200).json({
+      events: allEvents,
+      calendars,
+      fetchedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('API error:', err);
+    return res.status(500).json({ error: 'Failed to fetch calendars' });
+  }
+};

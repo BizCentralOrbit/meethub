@@ -1,0 +1,13 @@
+{
+  "name": "meethub",
+  "version": "1.0.0",
+  "description": "Unified meeting dashboard - aggregate all calendars in one place",
+  "private": true,
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "node-ical": "^0.18.0"
+  }
+}
